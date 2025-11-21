@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: good-pod-with-labels
+  namespace: boutique
+  labels:
+    app: test
+    env: dev
+spec:
+  containers:
+    - name: good
+      image: nginx
+      command: ["sleep", "3600"]
+

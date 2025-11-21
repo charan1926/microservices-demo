@@ -1,0 +1,194 @@
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    skipStagesAfterUnstable()
+  }
+
+  parameters {
+    choice(
+      name: 'TARGET_ENV',
+      choices: ['dev', 'stage', 'prod'],
+      description: 'Highest environment to deploy to'
+    )
+  }
+
+  environment {
+    APP_NAME   = "frontend"
+    IMAGE_REPO = "boutique-frontend"
+    TAG        = "build-${env.BUILD_NUMBER}"
+
+    CLUSTER   = "boutique"          // kind cluster name
+
+    DEV_NS    = "boutique-dev"
+    STAGE_NS  = "boutique-stage"
+    PROD_NS   = "boutique-prod"
+  }
+
+  stages {
+
+    /* ========== BUILD & SCAN ========== */
+
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Build & Unit Test') {
+      steps {
+        sh '''
+          cd src/frontend
+          echo "TODO: run real tests here"
+        '''
+      }
+    }
+
+    stage('Docker Build') {
+      steps {
+        sh '''
+          cd src/frontend
+          docker build -t ${IMAGE_REPO}:${TAG} .
+        '''
+      }
+    }
+
+    stage('Trivy Scan') {
+      steps {
+        sh '''
+          trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_REPO}:${TAG} || true
+        '''
+      }
+    }
+
+    stage('Load Image into kind') {
+      steps {
+        sh '''
+          kind load docker-image ${IMAGE_REPO}:${TAG} --name ${CLUSTER}
+        '''
+      }
+    }
+
+    /* ========== DEPLOY TO DEV ========== */
+
+    stage('Deploy to DEV') {
+      when {
+        anyOf {
+          expression { params.TARGET_ENV == 'dev' }
+          expression { params.TARGET_ENV == 'stage' }
+          expression { params.TARGET_ENV == 'prod' }
+        }
+      }
+      steps {
+        sh '''
+          echo "Deploying ${IMAGE_REPO}:${TAG} to DEV (${DEV_NS}) ..."
+          kubectl -n ${DEV_NS} set image deployment/${APP_NAME} \
+            server=${IMAGE_REPO}:${TAG}
+          kubectl -n ${DEV_NS} rollout status deployment/${APP_NAME}
+        '''
+      }
+    }
+
+    stage('Smoke Test DEV') {
+      when {
+        anyOf {
+          expression { params.TARGET_ENV == 'dev' }
+          expression { params.TARGET_ENV == 'stage' }
+          expression { params.TARGET_ENV == 'prod' }
+        }
+      }
+      steps {
+        sh '''
+          echo "TODO: implement real dev smoke tests (curl health endpoints, etc.)"
+        '''
+      }
+    }
+
+    /* ========== PROMOTE TO STAGE ========== */
+
+    stage('Approve Promotion to STAGE') {
+      when {
+        anyOf {
+          expression { params.TARGET_ENV == 'stage' }
+          expression { params.TARGET_ENV == 'prod' }
+        }
+      }
+      steps {
+        script {
+          input message: "Promote image ${IMAGE_REPO}:${TAG} to STAGE?", ok: "Promote"
+        }
+      }
+    }
+
+    stage('Deploy to STAGE') {
+      when {
+        anyOf {
+          expression { params.TARGET_ENV == 'stage' }
+          expression { params.TARGET_ENV == 'prod' }
+        }
+      }
+      steps {
+        sh '''
+          echo "Deploying ${IMAGE_REPO}:${TAG} to STAGE (${STAGE_NS}) ..."
+          kubectl -n ${STAGE_NS} set image deployment/${APP_NAME} \
+            server=${IMAGE_REPO}:${TAG}
+          kubectl -n ${STAGE_NS} rollout status deployment/${APP_NAME}
+        '''
+      }
+    }
+
+    stage('Smoke Test STAGE') {
+      when {
+        anyOf {
+          expression { params.TARGET_ENV == 'stage' }
+          expression { params.TARGET_ENV == 'prod' }
+        }
+      }
+      steps {
+        sh '''
+          echo "TODO: implement real stage smoke tests"
+        '''
+      }
+    }
+
+    /* ========== PROMOTE TO PROD ========== */
+
+    stage('Approve Promotion to PROD') {
+      when {
+        expression { params.TARGET_ENV == 'prod' }
+      }
+      steps {
+        script {
+          input message: "Promote image ${IMAGE_REPO}:${TAG} to PROD?", ok: "Promote"
+        }
+      }
+    }
+
+    stage('Deploy to PROD') {
+      when {
+        expression { params.TARGET_ENV == 'prod' }
+      }
+      steps {
+        sh '''
+          echo "Deploying ${IMAGE_REPO}:${TAG} to PROD (${PROD_NS}) ..."
+          kubectl -n ${PROD_NS} set image deployment/${APP_NAME} \
+            server=${IMAGE_REPO}:${TAG}
+          kubectl -n ${PROD_NS} rollout status deployment/${APP_NAME}
+        '''
+      }
+    }
+
+    stage('Smoke Test PROD') {
+      when {
+        expression { params.TARGET_ENV == 'prod' }
+      }
+      steps {
+        sh '''
+          echo "TODO: implement real prod smoke tests"
+        '''
+      }
+    }
+  }
+}
+
