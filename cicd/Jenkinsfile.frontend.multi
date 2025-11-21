@@ -19,7 +19,7 @@ pipeline {
     IMAGE_REPO = "boutique-frontend"
     TAG        = "build-${env.BUILD_NUMBER}"
 
-    CLUSTER   = "boutique"          // kind cluster name
+    CLUSTER   = "kind"          // kind cluster name
 
     DEV_NS    = "boutique-dev"
     STAGE_NS  = "boutique-stage"
