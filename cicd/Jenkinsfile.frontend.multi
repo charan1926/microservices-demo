@@ -14,17 +14,20 @@ pipeline {
     )
   }
 
-  environment {
+environment {
     APP_NAME   = "frontend"
     IMAGE_REPO = "boutique-frontend"
     TAG        = "build-${env.BUILD_NUMBER}"
 
-    CLUSTER   = "kind"          // kind cluster name
+    CLUSTER   = "kind"              // or whatever you're actually using
 
     DEV_NS    = "boutique-dev"
     STAGE_NS  = "boutique-stage"
     PROD_NS   = "boutique-prod"
-  }
+
+    KUBECONFIG = "/var/lib/jenkins/.kube/config"
+}
+
 
   stages {
 
