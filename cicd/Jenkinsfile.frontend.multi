@@ -53,13 +53,36 @@ pipeline {
         '''
       }
     }
-    stage('Trivy Scan') {
-        steps {
-          sh '''
-            trivy image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_REPO}:${TAG} || true
-          '''
-        }
+stage('Trivy Scan') {
+  steps {
+    sh '''
+      echo "== Trivy Scan Stage via Docker =="
+
+      # Check docker access
+      docker ps >/dev/null 2>&1 || {
+        echo "Docker not accessible from Jenkins. Skipping Trivy scan."
+        exit 0
       }
+
+      echo "Pulling Trivy image..."
+      docker pull aquasec/trivy:latest || {
+        echo "Failed to pull Trivy image. Skipping scan."
+        exit 0
+      }
+
+      echo "Running Trivy image scan on ${IMAGE_REPO}:${TAG} ..."
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        aquasec/trivy:latest image \
+          --skip-db-update \
+          --skip-java-db-update \
+          --exit-code 0 \
+          --severity HIGH,CRITICAL \
+          ${IMAGE_REPO}:${TAG} || true
+    '''
+  }
+}
+
     stage('Load Image into kind') {
       steps {
         sh '''
