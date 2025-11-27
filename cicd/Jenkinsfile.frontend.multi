@@ -14,24 +14,23 @@ pipeline {
     )
   }
 
-environment {
+  environment {
     APP_NAME   = "frontend"
     IMAGE_REPO = "boutique-frontend"
     TAG        = "build-${env.BUILD_NUMBER}"
 
-    CLUSTER   = "kind"              // or whatever you're actually using
+    CLUSTER   = "kind"
 
     DEV_NS    = "boutique-dev"
     STAGE_NS  = "boutique-stage"
     PROD_NS   = "boutique-prod"
 
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
-}
-
+  }
 
   stages {
 
-    /* ========== BUILD & SCAN ========== */
+    /* ========== BUILD & TEST ========== */
 
     stage('Checkout') {
       steps {
@@ -48,6 +47,48 @@ environment {
       }
     }
 
+    /* ========== VAULT SECRETS ========== */
+
+    stage('Fetch Secrets from Vault') {
+      steps {
+        withCredentials([string(credentialsId: 'vault-root-token', variable: 'VAULT_TOKEN')]) {
+          sh '''
+            echo "== Fetching secrets from Vault =="
+
+            VAULT_ADDR="http://127.0.0.1:8200"
+            SECRET_PATH="secret/data/dev/frontend"
+
+            RESPONSE=$(curl -s \
+              --header "X-Vault-Token: $VAULT_TOKEN" \
+              --request GET \
+              "$VAULT_ADDR/v1/$SECRET_PATH")
+
+            echo "$RESPONSE" | jq . >/dev/null 2>&1 || {
+              echo "Vault response invalid or jq missing"
+              echo "$RESPONSE"
+              exit 1
+            }
+
+            export DB_USER=$(echo "$RESPONSE" | jq -r '.data.data.DB_USER')
+            export DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.data.data.DB_PASSWORD')
+
+            echo "DB_USER from Vault: $DB_USER"
+            echo "DB_PASSWORD loaded (hidden)"
+
+            echo "DB_USER=$DB_USER"        >  vault_env.sh
+            echo "DB_PASSWORD=$DB_PASSWORD" >> vault_env.sh
+          '''
+          script {
+            def props = readProperties file: 'vault_env.sh'
+            env.DB_USER = props['DB_USER']
+            env.DB_PASSWORD = props['DB_PASSWORD']
+          }
+        }
+      }
+    }
+
+    /* ========== DOCKER BUILD & TRIVY ========== */
+
     stage('Docker Build') {
       steps {
         sh '''
@@ -56,33 +97,34 @@ environment {
         '''
       }
     }
-stage('Trivy Scan') {
-  steps {
-    sh '''
-      echo "== Trivy Scan Stage via Docker =="
 
-      # Check docker access
-      docker ps >/dev/null 2>&1 || {
-        echo "Docker not accessible from Jenkins. Skipping Trivy scan."
-        exit 0
+    stage('Trivy Scan') {
+      steps {
+        sh '''
+          echo "== Trivy Scan Stage via Docker =="
+
+          docker ps >/dev/null 2>&1 || {
+            echo "Docker not accessible from Jenkins. Skipping Trivy scan."
+            exit 0
+          }
+
+          echo "Pulling Trivy image..."
+          docker pull aquasec/trivy:latest || {
+            echo "Failed to pull Trivy image. Skipping scan."
+            exit 0
+          }
+
+          echo "Running Trivy image scan on ${IMAGE_REPO}:${TAG} ..."
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              ${IMAGE_REPO}:${TAG} || true
+        '''
       }
+    }
 
-      echo "Pulling Trivy image..."
-      docker pull aquasec/trivy:latest || {
-        echo "Failed to pull Trivy image. Skipping scan."
-        exit 0
-      }
-
-      echo "Running Trivy image scan on ${IMAGE_REPO}:${TAG} ..."
-      docker run --rm \
-        -v /var/run/docker.sock:/var/run/docker.sock \
-        aquasec/trivy:latest image \
-          --exit-code 0 \
-          --severity HIGH,CRITICAL \
-          ${IMAGE_REPO}:${TAG} || true
-    '''
-  }
-}
     stage('Load Image into kind') {
       steps {
         sh '''
@@ -103,6 +145,7 @@ stage('Trivy Scan') {
       }
       steps {
         sh '''
+          echo "Using DB_USER from Vault in deploy stage: ${DB_USER}"
           echo "Deploying ${IMAGE_REPO}:${TAG} to DEV (${DEV_NS}) ..."
           kubectl -n ${DEV_NS} set image deployment/${APP_NAME} \
             server=${IMAGE_REPO}:${TAG}
@@ -212,4 +255,3 @@ stage('Trivy Scan') {
     }
   }
 }
-
