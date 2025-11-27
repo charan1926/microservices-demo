@@ -49,7 +49,7 @@ pipeline {
 
     /* ========== VAULT SECRETS ========== */
 
-    stage('Fetch Secrets from Vault') {
+        stage('Fetch Secrets from Vault') {
       steps {
         withCredentials([string(credentialsId: 'vault-root-token', variable: 'VAULT_TOKEN')]) {
           sh '''
@@ -63,14 +63,17 @@ pipeline {
               --request GET \
               "$VAULT_ADDR/v1/$SECRET_PATH")
 
-            echo "$RESPONSE" | jq . >/dev/null 2>&1 || {
-              echo "Vault response invalid or jq missing"
-              echo "$RESPONSE"
-              exit 1
-            }
+            echo "Raw Vault response from Vault:"
+            echo "$RESPONSE"
 
-            export DB_USER=$(echo "$RESPONSE" | jq -r '.data.data.DB_USER')
-            export DB_PASSWORD=$(echo "$RESPONSE" | jq -r '.data.data.DB_PASSWORD')
+            # Parse DB_USER and DB_PASSWORD without jq (simple sed-based extraction)
+            DB_USER=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_USER":"\\([^"]*\\)".*/\\1/p')
+            DB_PASSWORD=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_PASSWORD":"\\([^"]*\\)".*/\\1/p')
+
+            if [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
+              echo "Failed to parse DB_USER/DB_PASSWORD from Vault response"
+              exit 1
+            fi
 
             echo "DB_USER from Vault: $DB_USER"
             echo "DB_PASSWORD loaded (hidden)"
@@ -86,7 +89,6 @@ pipeline {
         }
       }
     }
-
     /* ========== DOCKER BUILD & TRIVY ========== */
 
     stage('Docker Build') {
