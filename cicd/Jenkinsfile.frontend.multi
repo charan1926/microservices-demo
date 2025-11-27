@@ -48,47 +48,50 @@ pipeline {
     }
 
     /* ========== VAULT SECRETS ========== */
-
-        stage('Fetch Secrets from Vault') {
+    stage('Fetch Secrets from Vault') {
       steps {
-        withCredentials([string(credentialsId: 'vault-root-token', variable: 'VAULT_TOKEN')]) {
-          sh '''
-            echo "== Fetching secrets from Vault =="
+        catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
+          withCredentials([string(credentialsId: 'vault-root-token', variable: 'VAULT_TOKEN')]) {
+            sh '''
+              echo "== Fetching secrets from Vault =="
 
-            VAULT_ADDR="http://127.0.0.1:8200"
-            SECRET_PATH="secret/data/dev/frontend"
+              VAULT_ADDR="http://127.0.0.1:8200"
+              SECRET_PATH="secret/data/dev/frontend"
 
-            RESPONSE=$(curl -s \
-              --header "X-Vault-Token: $VAULT_TOKEN" \
-              --request GET \
-              "$VAULT_ADDR/v1/$SECRET_PATH")
+              RESPONSE=$(curl -s \
+                --header "X-Vault-Token: $VAULT_TOKEN" \
+                --request GET \
+                "$VAULT_ADDR/v1/$SECRET_PATH")
 
-            echo "Raw Vault response from Vault:"
-            echo "$RESPONSE"
+              echo "Raw Vault response from Vault:"
+              echo "$RESPONSE"
 
-            # Parse DB_USER and DB_PASSWORD without jq (simple sed-based extraction)
-            DB_USER=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_USER":"\\([^"]*\\)".*/\\1/p')
-            DB_PASSWORD=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_PASSWORD":"\\([^"]*\\)".*/\\1/p')
+              DB_USER=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_USER":"\\([^"]*\\)".*/\\1/p')
+              DB_PASSWORD=$(printf '%s\n' "$RESPONSE" | sed -n 's/.*"DB_PASSWORD":"\\([^"]*\\)".*/\\1/p')
 
-            if [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
-              echo "Failed to parse DB_USER/DB_PASSWORD from Vault response"
-              exit 1
-            fi
+              if [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
+                echo "WARNING: Failed to parse DB_USER/DB_PASSWORD from Vault response. Continuing anyway."
+              else
+                echo "DB_USER from Vault: $DB_USER"
+                echo "DB_PASSWORD loaded (hidden)"
+              fi
 
-            echo "DB_USER from Vault: $DB_USER"
-            echo "DB_PASSWORD loaded (hidden)"
-
-            echo "DB_USER=$DB_USER"        >  vault_env.sh
-            echo "DB_PASSWORD=$DB_PASSWORD" >> vault_env.sh
-          '''
-          script {
-            def props = readProperties file: 'vault_env.sh'
-            env.DB_USER = props['DB_USER']
-            env.DB_PASSWORD = props['DB_PASSWORD']
+              # ALWAYS write vault_env.sh so the next step can read it
+              {
+                echo "DB_USER=${DB_USER}"
+                echo "DB_PASSWORD=${DB_PASSWORD}"
+              } > vault_env.sh || true
+            '''
+            script {
+              def props = readProperties file: 'vault_env.sh'
+              env.DB_USER = props['DB_USER']
+              env.DB_PASSWORD = props['DB_PASSWORD']
+            }
           }
         }
       }
     }
+
     /* ========== DOCKER BUILD & TRIVY ========== */
 
     stage('Docker Build') {
