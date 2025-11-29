@@ -27,9 +27,11 @@ pipeline {
 
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
 
+    # Git identity used by Jenkins to commit manifest changes
     GIT_COMMIT_USER = "jenkins-cd"
     GIT_COMMIT_EMAIL = "jenkins@example.com"
 
+    # relative path where k8s manifests live in repo
     MANIFEST_DIR = "kubernetes-manifests"
   }
 
@@ -116,8 +118,6 @@ pipeline {
       }
     }
 
-    /* ========== PROMOTE BY COMMITTING MANIFEST → Argo CD will deploy ========== */
-
     stage('Promote: update manifest in git (Dev/Stage/Prod)') {
       when {
         anyOf {
@@ -141,21 +141,19 @@ pipeline {
             git pull origin main || true
 
             # Find YAML files under MANIFEST_DIR that mention boutique-frontend and update their image lines.
-            # This is intentionally broad — it updates any image lines referencing boutique-frontend.
             FOUND=0
             if [ -d "${MANIFEST_DIR}" ]; then
-              FILES=$(find ${MANIFEST_DIR} -type f \( -name "*.yaml" -o -name "*.yml" \) -print)
+              FILES="$(find ${MANIFEST_DIR} -type f -name '*.yaml' -print; find ${MANIFEST_DIR} -type f -name '*.yml' -print)"
               for f in $FILES; do
                 if grep -q "boutique-frontend" "$f"; then
                   echo "Updating image in $f"
-                  # replace any existing boutique-frontend image with the new tag
                   sed -i -E "s|(image:[[:space:]]*).*boutique-frontend:[^[:space:]]*|\\1 ${IMAGE_REPO}:${TAG}|g" "$f" || true
                   FOUND=1
                 fi
               done
             fi
 
-            # Fallback: update any image lines in repo if MANIFEST_DIR not used
+            # Fallback: repo-wide replace if none found in MANIFEST_DIR
             if [ "$FOUND" -eq 0 ]; then
               echo "No files under ${MANIFEST_DIR} referenced boutique-frontend; attempting repository-wide replace"
               FILES=$(git ls-files '*.yaml' '*.yml' || true)
@@ -172,29 +170,23 @@ pipeline {
               echo "WARNING: No manifest updated (no file contained 'boutique-frontend')."
             else
               git add -A
-              # Only commit if there are changes
               if git diff --cached --quiet; then
                 echo "No manifest changes to commit."
               else
                 git commit -m "ci: promote ${IMAGE_REPO}:${TAG} [ci skip]" || true
-                # Push using provided credentials (supports HTTPS push)
-                # Configure remote to include credentials if needed
                 ORIGIN_URL=$(git config --get remote.origin.url || echo "")
                 if echo "$ORIGIN_URL" | grep -q "https://"; then
-                  # embed credentials for push
                   PROTO=$(echo "$ORIGIN_URL" | sed -E 's#(https://).*#\\1#')
                   REMAINDER=$(echo "$ORIGIN_URL" | sed -E 's#https://##')
                   AUTH_URL="https://${GIT_USER}:${GIT_PASS}@${REMAINDER}"
                   git push "$AUTH_URL" HEAD:main || { echo "git push via auth-url failed; trying regular git push"; git push origin HEAD:main || true; }
                 else
-                  # SSH or other remote - attempt normal push (assumes Jenkins has keys)
                   git push origin HEAD:main || true
                 fi
               fi
             fi
 
-            # Wait for ArgoCD to sync (only if argocd is installed and app exists)
-            # Map TARGET_ENV to argocd app name
+            # Wait for ArgoCD to sync
             APP_NAME="boutique-${TARGET_ENV}"
             echo "Waiting for ArgoCD app ${APP_NAME} to become Synced+Healthy (timeout 180s)..."
             T=0
