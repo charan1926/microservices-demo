@@ -26,12 +26,16 @@ pipeline {
     PROD_NS   = "boutique-prod"
 
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
+
+    # Git identity used by Jenkins to commit manifest changes
+    GIT_COMMIT_USER = "jenkins-cd"
+    GIT_COMMIT_EMAIL = "jenkins@example.com"
+
+    # relative path where k8s manifests live in repo
+    MANIFEST_DIR = "kubernetes-manifests"
   }
 
   stages {
-
-    /* ========== BUILD & TEST ========== */
-
     stage('Checkout') {
       steps {
         checkout scm
@@ -47,14 +51,12 @@ pipeline {
       }
     }
 
-    /* ========== VAULT SECRETS ========== */
     stage('Fetch Secrets from Vault') {
       steps {
         catchError(buildResult: 'SUCCESS', stageResult: 'SUCCESS') {
           withCredentials([string(credentialsId: 'vault-root-token', variable: 'VAULT_TOKEN')]) {
             sh '''
               echo "== Fetching secrets from Vault =="
-
               VAULT_ADDR="http://127.0.0.1:8200"
               SECRET_PATH="secret/data/dev/frontend"
 
@@ -76,11 +78,7 @@ pipeline {
                 echo "DB_PASSWORD loaded (hidden)"
               fi
 
-              # ALWAYS write vault_env.sh so the next step can read it
-              {
-                echo "DB_USER=${DB_USER}"
-                echo "DB_PASSWORD=${DB_PASSWORD}"
-              } > vault_env.sh || true
+              { echo "DB_USER=${DB_USER}"; echo "DB_PASSWORD=${DB_PASSWORD}"; } > vault_env.sh || true
             '''
             script {
               def props = readProperties file: 'vault_env.sh'
@@ -91,8 +89,6 @@ pipeline {
         }
       }
     }
-
-    /* ========== DOCKER BUILD & TRIVY ========== */
 
     stage('Docker Build') {
       steps {
@@ -107,25 +103,9 @@ pipeline {
       steps {
         sh '''
           echo "== Trivy Scan Stage via Docker =="
-
-          docker ps >/dev/null 2>&1 || {
-            echo "Docker not accessible from Jenkins. Skipping Trivy scan."
-            exit 0
-          }
-
-          echo "Pulling Trivy image..."
-          docker pull aquasec/trivy:latest || {
-            echo "Failed to pull Trivy image. Skipping scan."
-            exit 0
-          }
-
-          echo "Running Trivy image scan on ${IMAGE_REPO}:${TAG} ..."
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            aquasec/trivy:latest image \
-              --exit-code 0 \
-              --severity HIGH,CRITICAL \
-              ${IMAGE_REPO}:${TAG} || true
+          docker ps >/dev/null 2>&1 || { echo "Docker not accessible from Jenkins. Skipping Trivy scan."; exit 0; }
+          docker pull aquasec/trivy:latest || { echo "Failed to pull Trivy image. Skipping scan."; exit 0; }
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL ${IMAGE_REPO}:${TAG} || true
         '''
       }
     }
@@ -138,9 +118,9 @@ pipeline {
       }
     }
 
-    /* ========== DEPLOY TO DEV ========== */
+    /* ========== PROMOTE BY COMMITTING MANIFEST → Argo CD will deploy ========== */
 
-    stage('Deploy to DEV') {
+    stage('Promote: update manifest in git (Dev/Stage/Prod)') {
       when {
         anyOf {
           expression { params.TARGET_ENV == 'dev' }
@@ -149,13 +129,94 @@ pipeline {
         }
       }
       steps {
-        sh '''
-          echo "Using DB_USER from Vault in deploy stage: ${DB_USER}"
-          echo "Deploying ${IMAGE_REPO}:${TAG} to DEV (${DEV_NS}) ..."
-          kubectl -n ${DEV_NS} set image deployment/${APP_NAME} \
-            server=${IMAGE_REPO}:${TAG}
-          kubectl -n ${DEV_NS} rollout status deployment/${APP_NAME}
-        '''
+        withCredentials([usernamePassword(credentialsId: 'git-credentials', passwordVariable: 'GIT_PASS', usernameVariable: 'GIT_USER')]) {
+          sh '''
+            set -e
+            echo "Promoting image ${IMAGE_REPO}:${TAG} for TARGET_ENV=${TARGET_ENV}"
+
+            # configure git identity
+            git config user.email "${GIT_COMMIT_EMAIL}"
+            git config user.name "${GIT_COMMIT_USER}"
+
+            # Ensure we have a clean workspace and the latest main
+            git checkout main || true
+            git pull origin main || true
+
+            # Find YAML files under MANIFEST_DIR that mention boutique-frontend and update their image lines.
+            # This is intentionally broad — it updates any image lines referencing boutique-frontend.
+            FOUND=0
+            if [ -d "${MANIFEST_DIR}" ]; then
+              FILES=$(find ${MANIFEST_DIR} -type f \( -name "*.yaml" -o -name "*.yml" \) -print)
+              for f in $FILES; do
+                if grep -q "boutique-frontend" "$f"; then
+                  echo "Updating image in $f"
+                  # replace any existing boutique-frontend image with the new tag
+                  sed -i -E "s|(image:[[:space:]]*).*boutique-frontend:[^[:space:]]*|\\1 ${IMAGE_REPO}:${TAG}|g" "$f" || true
+                  FOUND=1
+                fi
+              done
+            fi
+
+            # Fallback: update any image lines in repo if MANIFEST_DIR not used
+            if [ "$FOUND" -eq 0 ]; then
+              echo "No files under ${MANIFEST_DIR} referenced boutique-frontend; attempting repository-wide replace"
+              FILES=$(git ls-files '*.yaml' '*.yml' || true)
+              for f in $FILES; do
+                if grep -q "boutique-frontend" "$f"; then
+                  echo "Updating image in $f"
+                  sed -i -E "s|(image:[[:space:]]*).*boutique-frontend:[^[:space:]]*|\\1 ${IMAGE_REPO}:${TAG}|g" "$f" || true
+                  FOUND=1
+                fi
+              done
+            fi
+
+            if [ "$FOUND" -eq 0 ]; then
+              echo "WARNING: No manifest updated (no file contained 'boutique-frontend')."
+            else
+              git add -A
+              # Only commit if there are changes
+              if git diff --cached --quiet; then
+                echo "No manifest changes to commit."
+              else
+                git commit -m "ci: promote ${IMAGE_REPO}:${TAG} [ci skip]" || true
+                # Push using provided credentials (supports HTTPS push)
+                # Configure remote to include credentials if needed
+                ORIGIN_URL=$(git config --get remote.origin.url || echo "")
+                if echo "$ORIGIN_URL" | grep -q "https://"; then
+                  # embed credentials for push
+                  PROTO=$(echo "$ORIGIN_URL" | sed -E 's#(https://).*#\\1#')
+                  REMAINDER=$(echo "$ORIGIN_URL" | sed -E 's#https://##')
+                  AUTH_URL="https://${GIT_USER}:${GIT_PASS}@${REMAINDER}"
+                  git push "$AUTH_URL" HEAD:main || { echo "git push via auth-url failed; trying regular git push"; git push origin HEAD:main || true; }
+                else
+                  # SSH or other remote - attempt normal push (assumes Jenkins has keys)
+                  git push origin HEAD:main || true
+                fi
+              fi
+            fi
+
+            # Wait for ArgoCD to sync (only if argocd is installed and app exists)
+            # Map TARGET_ENV to argocd app name
+            APP_NAME="boutique-${TARGET_ENV}"
+            echo "Waiting for ArgoCD app ${APP_NAME} to become Synced+Healthy (timeout 180s)..."
+            T=0
+            until [ $T -ge 180 ]; do
+              SYNC=$(kubectl -n argocd get application ${APP_NAME} -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "Missing")
+              HEALTH=$(kubectl -n argocd get application ${APP_NAME} -o jsonpath='{.status.health.status}' 2>/dev/null || echo "Missing")
+              echo "ArgoCD status: sync=${SYNC} health=${HEALTH}"
+              if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
+                echo "ArgoCD app ${APP_NAME} is Synced and Healthy"
+                break
+              fi
+              sleep 5
+              T=$((T+5))
+            done
+
+            if [ $T -ge 180 ]; then
+              echo "Timeout waiting for ArgoCD app ${APP_NAME} to sync. Check ArgoCD UI for details."
+            fi
+          '''
+        }
       }
     }
 
@@ -174,8 +235,6 @@ pipeline {
       }
     }
 
-    /* ========== PROMOTE TO STAGE ========== */
-
     stage('Approve Promotion to STAGE') {
       when {
         anyOf {
@@ -187,23 +246,6 @@ pipeline {
         script {
           input message: "Promote image ${IMAGE_REPO}:${TAG} to STAGE?", ok: "Promote"
         }
-      }
-    }
-
-    stage('Deploy to STAGE') {
-      when {
-        anyOf {
-          expression { params.TARGET_ENV == 'stage' }
-          expression { params.TARGET_ENV == 'prod' }
-        }
-      }
-      steps {
-        sh '''
-          echo "Deploying ${IMAGE_REPO}:${TAG} to STAGE (${STAGE_NS}) ..."
-          kubectl -n ${STAGE_NS} set image deployment/${APP_NAME} \
-            server=${IMAGE_REPO}:${TAG}
-          kubectl -n ${STAGE_NS} rollout status deployment/${APP_NAME}
-        '''
       }
     }
 
@@ -221,8 +263,6 @@ pipeline {
       }
     }
 
-    /* ========== PROMOTE TO PROD ========== */
-
     stage('Approve Promotion to PROD') {
       when {
         expression { params.TARGET_ENV == 'prod' }
@@ -231,20 +271,6 @@ pipeline {
         script {
           input message: "Promote image ${IMAGE_REPO}:${TAG} to PROD?", ok: "Promote"
         }
-      }
-    }
-
-    stage('Deploy to PROD') {
-      when {
-        expression { params.TARGET_ENV == 'prod' }
-      }
-      steps {
-        sh '''
-          echo "Deploying ${IMAGE_REPO}:${TAG} to PROD (${PROD_NS}) ..."
-          kubectl -n ${PROD_NS} set image deployment/${APP_NAME} \
-            server=${IMAGE_REPO}:${TAG}
-          kubectl -n ${PROD_NS} rollout status deployment/${APP_NAME}
-        '''
       }
     }
 
