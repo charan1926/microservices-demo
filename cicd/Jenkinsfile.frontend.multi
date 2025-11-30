@@ -26,12 +26,8 @@ pipeline {
     PROD_NS   = "boutique-prod"
 
     KUBECONFIG = "/var/lib/jenkins/.kube/config"
-
-    # Git identity used by Jenkins to commit manifest changes
     GIT_COMMIT_USER = "jenkins-cd"
     GIT_COMMIT_EMAIL = "jenkins@example.com"
-
-    # relative path where k8s manifests live in repo
     MANIFEST_DIR = "kubernetes-manifests"
   }
 
