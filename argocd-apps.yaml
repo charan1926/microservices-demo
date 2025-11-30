@@ -1,0 +1,57 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: boutique-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/charan1926/microservices-demo.git'
+    targetRevision: HEAD
+    path: kubernetes-manifests
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: boutique-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: boutique-stage
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/charan1926/microservices-demo.git'
+    targetRevision: HEAD
+    path: kubernetes-manifests
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: boutique-stage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: boutique-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/charan1926/microservices-demo.git'
+    targetRevision: HEAD
+    path: kubernetes-manifests
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: boutique-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
